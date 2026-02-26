@@ -169,62 +169,22 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
     }).format(num).replace('$', '$') // Ensure only one $
   }
 
-  const formatTitleNumber = (title) => {
-    if (!title) return title;
-    // First, remove double dollar signs
-    let formatted = title.replace(/\$\$/g, '$');
-    
-    // Handle numbers with commas: $130,000 or above -> $130k or above
-    formatted = formatted.replace(/\$(\d{1,3}),(\d{3})(?:,(\d{3}))?/g, (match, p1, p2, p3) => {
-      if (p3) {
-        // Millions: $1,234,567 -> $1.2M
-        const num = parseFloat(p1 + p2 + p3);
-        return `$${(num / 1000000).toFixed(1)}M`;
-      } else {
-        // Thousands: $130,000 -> $130k (just use p1, don't add p2[0])
-        return `$${p1}k`;
-      }
-    });
-    
-    // Handle numbers with decimals like "199.99" -> "$199.9k" (but only if it's a price, not a year)
-    formatted = formatted.replace(/\$(\d+)\.(\d{2,})/g, (match, whole, decimal) => {
-      const num = parseFloat(match.replace('$', ''));
-      // Only format if it's >= 1000 and not a year (years are typically 2000-2099)
-      if (num >= 1000 && (num < 2000 || num > 2099)) {
-        const thousands = (num / 1000).toFixed(1);
-        return `$${thousands}k`;
-      }
-      return match;
-    });
-    
-    // Handle cases like "$1kk" -> "$100k" (1kk = 100k)
-    formatted = formatted.replace(/\$(\d+)kk/g, (match, num) => {
-      const numVal = parseInt(num) * 100;
-      return `$${numVal}k`;
-    });
-    
-    // Handle standalone large numbers that are prices (not years): 100000 -> $100k
-    // Exclude years (2000-2099) and numbers that are already formatted
-    formatted = formatted.replace(/\$(\d{4,})(?![kM])/g, (match, num) => {
-      const numVal = parseInt(num);
-      // Don't format years (2000-2099)
-      if (numVal >= 2000 && numVal <= 2099) {
-        return match;
-      }
-      if (numVal >= 1000000) {
-        return `$${(numVal / 1000000).toFixed(1)}M`;
-      } else if (numVal >= 1000) {
-        return `$${Math.floor(numVal / 1000)}k`;
-      }
-      return match;
-    });
-    
-    return formatted;
+  const formatMarketText = (text) => {
+    if (!text) return text
+    const normalized = String(text).replace(/\$\$/g, '$')
+    return normalized.replace(/\$([\d,]+(?:\.\d+)?)/g, (_, raw) => {
+      const num = Number(String(raw).replace(/,/g, ''))
+      if (!Number.isFinite(num)) return `$${raw}`
+      const hasNonZeroDecimals = String(raw).includes('.') && !String(raw).endsWith('.00')
+      return hasNonZeroDecimals
+        ? `$${num.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+        : `$${num.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`
+    })
   }
   
   const formatChoiceLabel = (label) => {
-    if (!label) return label;
-    return formatTitleNumber(label);
+    if (!label) return label
+    return formatMarketText(label)
   }
 
   const formatDate = (dateStr) => {
@@ -1144,7 +1104,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
               margin: 0,
               marginBottom: '0.25rem'
             }}>
-              {formatTitleNumber(displayEvent?.title || event?.title)}
+              {formatMarketText(displayEvent?.title || event?.title)}
             </h2>
             {choice && (
               <p style={{

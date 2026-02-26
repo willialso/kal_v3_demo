@@ -26,7 +26,8 @@ class EventFetcher:
     TARGET_SERIES = [
         'KXBTCMAXY',   # How high will Bitcoin get this year?
         'KXBTCMINY',   # How low will Bitcoin get this year?
-        'KXBTC2025100' # Will Bitcoin be above $100k by Dec 31, 2025?
+        'KXBTC2025100' # Will Bitcoin be above $100k by Dec 31, 2025?,
+        'KXBTC'       # Short-dated BTC event stream
     ]
     
     def __init__(self, registry=None):

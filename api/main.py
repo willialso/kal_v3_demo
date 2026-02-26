@@ -237,6 +237,21 @@ async def get_btc_top_volume_events(limit: int = 10):
         # Format events for frontend (matching expected format)
         formatted_events = []
         series_count = 0
+
+        def parse_ticker_threshold(ticker_value: str) -> Optional[float]:
+            """Extract numeric threshold from Kalshi-style ticker suffix."""
+            if not ticker_value:
+                return None
+            parts = ticker_value.split('-')
+            # Typical shape: KXBTCMAXY-26DEC31-99999.99
+            # Use final token if numeric, regardless of part count.
+            if len(parts) < 2:
+                return None
+            candidate = str(parts[-1]).replace(',', '').strip()
+            try:
+                return float(candidate)
+            except ValueError:
+                return None
         
         for series_key, series_events in events_by_series.items():
             if series_count >= safe_limit:
@@ -248,14 +263,7 @@ async def get_btc_top_volume_events(limit: int = 10):
             series_ticker = ticker.split('-')[0] if '-' in ticker else ''
             
             # Extract threshold from base event ticker
-            threshold_price = None
-            if ticker:
-                parts = ticker.split('-')
-                if len(parts) >= 4:
-                    try:
-                        threshold_price = float(parts[-1])
-                    except ValueError:
-                        pass
+            threshold_price = parse_ticker_threshold(ticker)
             
             # Get market data for YES/NO prices from base event (already fetched in event_fetcher)
             market_id = base_event.get('market_id', '') or ticker
@@ -269,14 +277,7 @@ async def get_btc_top_volume_events(limit: int = 10):
                 top_2_events = sorted(series_events, key=lambda e: float(e.get('volume', 0) or 0), reverse=True)[:2]
                 for choice_event in top_2_events:
                     choice_ticker = choice_event.get('ticker', '') or choice_event.get('event_ticker', '')
-                    choice_threshold = None
-                    if choice_ticker:
-                        parts = choice_ticker.split('-')
-                        if len(parts) >= 4:
-                            try:
-                                choice_threshold = float(parts[-1])
-                            except ValueError:
-                                pass
+                    choice_threshold = parse_ticker_threshold(choice_ticker)
                     
                     choice_yes = choice_event.get('yes_price', 0.5)
                     choice_no = choice_event.get('no_price', 0.5)
@@ -390,92 +391,8 @@ async def get_btc_top_volume_events(limit: int = 10):
             series_count += 1
         
 
-        # Keep only events that are hedgeable right now (best UX).
-        hedgeable_by_expiry = {}
-
-        async def _is_event_hedgeable_now(event_payload):
-            settlement_raw = event_payload.get("settlement_date")
-            if not settlement_raw:
-                return False
-
-            settlement_str = str(settlement_raw)
-            expiry_token = settlement_str.split("T")[0].split(" ")[0]
-            try:
-                expiry_date_obj = date.fromisoformat(expiry_token)
-            except ValueError:
-                return False
-
-            expiry_key = expiry_date_obj.isoformat()
-            if expiry_key in hedgeable_by_expiry:
-                return hedgeable_by_expiry[expiry_key]
-
-            days_to_expiry = (expiry_date_obj - date.today()).days
-            if days_to_expiry < 1:
-                hedgeable_by_expiry[expiry_key] = False
-                return False
-
-            if days_to_expiry <= 30:
-                min_days = max(1, days_to_expiry - 30)
-                max_days = days_to_expiry + 30
-            else:
-                min_days = max(1, days_to_expiry - 14)
-                max_days = days_to_expiry + 14
-
-            availability_cache_key = f"surface-hedgeable-{expiry_key}-{min_days}-{max_days}"
-
-            async def _fetch_available_chains():
-                return await option_chain_service.get_option_chains(
-                    underlying='BTC',
-                    expiry_date=expiry_date_obj,
-                    min_days_to_expiry=min_days,
-                    max_days_to_expiry=max_days
-                )
-
-            try:
-                chains = await chain_cache.get(availability_cache_key, _fetch_available_chains, ttl_seconds=180)
-                hedgeable = bool(chains)
-            except Exception as availability_error:
-                logger.warning(
-                    "Failed hedgeability check for surfaced event",
-                    event_ticker=event_payload.get("event_ticker"),
-                    settlement_date=settlement_str,
-                    error=str(availability_error)
-                )
-                hedgeable = False
-
-            hedgeable_by_expiry[expiry_key] = hedgeable
-            return hedgeable
-
-        if formatted_events:
-            import asyncio
-            checks = await asyncio.gather(*[_is_event_hedgeable_now(evt) for evt in formatted_events], return_exceptions=True)
-
-            hedgeable_events = []
-            for evt, ok in zip(formatted_events, checks):
-                if isinstance(ok, Exception):
-                    logger.warning(
-                        "Unexpected hedgeability check exception",
-                        event_ticker=evt.get("event_ticker"),
-                        error=str(ok)
-                    )
-                    continue
-                if ok:
-                    hedgeable_events.append(evt)
-
-            formatted_events = hedgeable_events
-
-        if not formatted_events:
-            app.state.btc_events = []
-            app.state.btc_top_volume_cache = {
-                "timestamp": time.time(),
-                "events": []
-            }
-            return {
-                "status": "success",
-                "count": 0,
-                "events": [],
-                "message": "No currently hedgeable BTC events available"
-            }
+        # Keep events visible even when currently unhedgeable.
+        # Hedge quote endpoints return explicit rejection reasons when unavailable.
 
         # Cache formatted events (with choices) for hedge quote matching
         app.state.btc_events = formatted_events
