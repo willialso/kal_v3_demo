@@ -187,6 +187,50 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
     return formatMarketText(label)
   }
 
+  const extractChoiceThreshold = (choiceValue) => {
+    if (!choiceValue) return null
+
+    const direct = Number(choiceValue.price_threshold ?? choiceValue.threshold_price)
+    if (Number.isFinite(direct) && direct > 0) return direct
+
+    const ticker = String(choiceValue.market_ticker || '').trim()
+    if (ticker) {
+      const tickerParts = ticker.split('-')
+      const tickerCandidate = Number(String(tickerParts[tickerParts.length - 1]).replace(/,/g, ''))
+      if (Number.isFinite(tickerCandidate) && tickerCandidate > 0) return tickerCandidate
+    }
+
+    const label = String(choiceValue.label || '')
+    const match = label.match(/\$([\d,]+(?:\.\d+)?)/)
+    if (match) {
+      const fromLabel = Number(match[1].replace(/,/g, ''))
+      if (Number.isFinite(fromLabel) && fromLabel > 0) return fromLabel
+    }
+
+    return null
+  }
+
+  const formatThresholdValue = (value) => {
+    if (!Number.isFinite(value) || value <= 0) return null
+    const hasDecimals = Math.abs(value - Math.round(value)) > 0.000001
+    return `$${value.toLocaleString('en-US', {
+      minimumFractionDigits: hasDecimals ? 2 : 0,
+      maximumFractionDigits: 2
+    })}`
+  }
+
+  const modalTitle = (() => {
+    const baseTitle = formatMarketText(event?.title || displayEvent?.title || '')
+    if (!choice) return baseTitle
+
+    const threshold = extractChoiceThreshold(choice)
+    const replacement = formatThresholdValue(threshold)
+    if (!replacement) return baseTitle
+
+    // Preserve base event sentence; only replace contract threshold.
+    return baseTitle.replace(/\$[\d,]+(?:\.\d+)?/, replacement)
+  })()
+
   const formatDate = (dateStr) => {
     if (!dateStr) return ''
     const date = new Date(dateStr)
@@ -1104,7 +1148,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
               margin: 0,
               marginBottom: '0.25rem'
             }}>
-              {formatMarketText(displayEvent?.title || event?.title)}
+              {modalTitle}
             </h2>
             {choice && (
               <p style={{
