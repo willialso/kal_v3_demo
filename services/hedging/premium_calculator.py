@@ -27,9 +27,9 @@ class PremiumCalculator:
     - Require minimum value ratio (max_payout must be significantly more than premium)
     """
     
-    MIN_VALUE_RATIO = Decimal('1.1')  # Max payout must be at least 10% more than premium
+    MIN_VALUE_RATIO = Decimal('1.10')  # Max payout must be at least 10% more than premium
     MIN_CHARGED_PREMIUM_USD = Decimal('5')  # Minimum charge to user (after markup)
-    MIN_MAX_PAYOUT_FOR_MIN_CHARGE = Decimal('5.50')  # $5 * 1.1 - minimum max_payout needed for $5 charge
+    MIN_MAX_PAYOUT_FOR_MIN_CHARGE = MIN_CHARGED_PREMIUM_USD * MIN_VALUE_RATIO  # $5 * 1.1 - minimum max_payout needed for $5 charge
     
     def calculate_and_scale(
         self,
@@ -116,7 +116,7 @@ class PremiumCalculator:
         # But we can reject candidates that would result in ratio too close to 1.0
         final_ratio = max_payout_final / premium_final if premium_final > 0 else Decimal('0')
         
-        if final_ratio < Decimal('1.01'):
+        if final_ratio < Decimal('1.001'):
             # Ratio is too close to 1.0 (premium ≈ max_payout), reject
             logger.debug(
                 "Rejecting candidate: ratio too close to 1.0 (premium ≈ max_payout)",

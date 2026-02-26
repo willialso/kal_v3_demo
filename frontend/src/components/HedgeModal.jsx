@@ -27,6 +27,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
   // Amount input state (like Kalshi UI)
   const [amountInput, setAmountInput] = useState('')
   const [amountError, setAmountError] = useState(null)
+  const [unavailableHint, setUnavailableHint] = useState(null)
   // Track if strategy has been built (Option A: Smart Defaults)
   const [strategyBuilt, setStrategyBuilt] = useState(false)
   // Ref to prevent infinite loops in useEffect
@@ -34,6 +35,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
 
   // Use choice data if provided (for "how" events), otherwise use event data
   const displayEvent = choice || event
+  const choiceTicker = choice?.market_ticker || null
   
   // Use base ticker (series ticker) instead of full market_ticker with strike appended
   // For "how" events, use base ticker (e.g., "KXBTCMINY-25") and let backend use threshold_price
@@ -87,12 +89,29 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
     }
   }
   // For other events (like "Will BTC price" KXBTC2025100), keep full ticker
+
+  // Keep full market ticker for "when will" choice selections
+  const isWhenChoice = !!choice?.market_ticker && (
+    choice?.event_ticker === 'KXBTCMAX150' ||
+    !!choice?.date_threshold ||
+    /^By\s/i.test(choice?.label || '')
+  )
+  if (isWhenChoice) {
+    eventTicker = choice.market_ticker
+  }
   
+  const toProbabilityValue = (value) => {
+    if (value === null || value === undefined) return null
+    const parsed = Number(String(value).replace('%', '').trim())
+    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 100) return null
+    return parsed
+  }
+
   // Get YES/NO prices for display
-  const yesPrice = choice?.yes_probability || event?.yes_probability || 50
-  const noPrice = choice?.no_probability || event?.no_probability || 50
-  const yesPriceCents = Math.round(yesPrice)
-  const noPriceCents = Math.round(noPrice)
+  const yesPrice = toProbabilityValue(choice?.yes_probability ?? choice?.yes_percentage ?? event?.yes_probability ?? event?.yes_percentage)
+  const noPrice = toProbabilityValue(choice?.no_probability ?? choice?.no_percentage ?? event?.no_probability ?? event?.no_percentage)
+  const yesPriceCents = yesPrice === null ? null : Math.round(yesPrice)
+  const noPriceCents = noPrice === null ? null : Math.round(noPrice)
 
   // Calculate duration from settlement date
   const calculateDuration = () => {
@@ -225,6 +244,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
       setSelectedOption(null)
       setStrategyBuilt(false)
       setHedgeOptions([])
+      setUnavailableHint(null)
     }
   }, [selectedPosition, eventTicker])
 
@@ -315,6 +335,21 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
       if (expiryDate.length > 10) {
         expiryDate = expiryDate.substring(0, 10)
       }
+
+      // Force choice-level expiry for "when will" selections when present
+      var choiceDateSource = choice?.date_threshold || choice?.settlement_date
+      if (choiceDateSource) {
+        var choiceDateStr = String(choiceDateSource)
+        if (choiceDateStr.includes('T')) {
+          expiryDate = choiceDateStr.split('T')[0]
+        } else if (choiceDateStr.includes(' ')) {
+          expiryDate = choiceDateStr.split(' ')[0]
+        } else {
+          expiryDate = choiceDateStr.substring(0, 10)
+        }
+      }
+
+      // Force choice-level expiry for "when will" selections when present
       
       // Fetch both preview counts and actual options for both positions in parallel using V3 endpoint
       const paramsYes = new URLSearchParams({
@@ -343,6 +378,19 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
         eventTicker
       })
       
+      if (choice?.market_ticker) {
+        paramsYes.set('choice_ticker', choice.market_ticker)
+        paramsNo.set('choice_ticker', choice.market_ticker)
+      }
+
+      if (choice?.market_ticker) {
+        paramsYes.set('choice_ticker', choice.market_ticker)
+        paramsNo.set('choice_ticker', choice.market_ticker)
+      }
+
+      if (choiceTicker) paramsYes.set('choice_ticker', choiceTicker)
+      if (choiceTicker) paramsNo.set('choice_ticker', choiceTicker)
+
       const [yesResponse, noResponse] = await Promise.all([
         fetch(`${API_BASE}/kalshi/protection-tiers?${paramsYes.toString()}`).catch(() => null),
         fetch(`${API_BASE}/kalshi/protection-tiers?${paramsNo.toString()}`).catch(() => null)
@@ -466,6 +514,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
     fetchingRef.current = true
     setLoadingOptions(true)
     setError(null)
+    setUnavailableHint(null)
     
     // Calculate displayed stake from amount input (Option 1: Real-time Preview)
     const displayedStake = calculateDisplayedStake(selectedPosition)
@@ -546,6 +595,16 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
         no_stake_usd: noStake.toString()
       })
       
+      if (choice?.market_ticker) {
+        params.set('choice_ticker', choice.market_ticker)
+      }
+
+      if (choice?.market_ticker) {
+        params.set('choice_ticker', choice.market_ticker)
+      }
+
+      if (choiceTicker) params.set('choice_ticker', choiceTicker)
+
       const url = `${API_BASE}/kalshi/protection-tiers?${params.toString()}`
       console.log('🔵 FETCHING V3 PROTECTION TIERS - Full URL:', url)
       console.log('🔵 Request params:', {
@@ -593,9 +652,24 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
       
       // Handle V3 response structure
       if (data.status === 'unavailable') {
-        // Show message but allow custom input
         setHedgeOptions([])
-        console.warn('Protection unavailable for this market')
+        const backendReason =
+          data?.rejection_reasons?.availability?.[0] ||
+          data?.rejection_reasons?.no_options?.[0] ||
+          data?.rejection_reasons?.error?.[0] ||
+          ''
+        const isDateWindowIssue = /No option chains available for expiry|Searched for expiries between/i.test(backendReason)
+
+        setUnavailableHint(
+          isDateWindowIssue
+            ? "No options currently available near this date. Try a different 'By' date or adjust amount."
+            : "Protection options are not available for this market at this time."
+        )
+
+        if (backendReason) {
+          console.warn('Protection unavailable:', backendReason)
+        }
+
         // Set strategyBuilt to true so "No Protection Available" message displays
         setStrategyBuilt(true)
       } else if (data.status === 'available' && data.tiers && Array.isArray(data.tiers)) {
@@ -681,17 +755,20 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
         console.log('✅ OPTIONS COUNT:', deduplicatedOptions.length)
         console.log('✅ DEDUPLICATED: Removed', options.length - deduplicatedOptions.length, 'duplicate strike ranges')
         setHedgeOptions(deduplicatedOptions)
+        setUnavailableHint(null)
         // Set strategyBuilt only after successful fetch (Fix: Build Strategy double-click)
         setStrategyBuilt(true)
       } else {
         console.warn('Unexpected response format:', data)
         setHedgeOptions([])
+        setUnavailableHint("Protection options are not available for this market at this time.")
         // Set strategyBuilt to true so "No Protection Available" message displays
         setStrategyBuilt(true)
       }
     } catch (err) {
       console.error('Failed to fetch hedge options:', err)
-      setError(err.message || 'Failed to fetch hedge options')
+      setError(null)
+      setUnavailableHint("Unable to load protection right now. Please try again.")
       // Don't block user - allow custom input if options fail
       setHedgeOptions([])
       // Set strategyBuilt to true so "No Protection Available" message displays
@@ -1167,7 +1244,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
                     }}
                   >
                     <div style={{ fontSize: '1rem', fontWeight: 700 }}>
-                      Yes {yesPriceCents}¢
+                      Yes {yesPriceCents === null ? '--' : `${yesPriceCents}¢`}
                     </div>
                   </button>
                   <button
@@ -1202,7 +1279,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
                     }}
                   >
                     <div style={{ fontSize: '1rem', fontWeight: 700 }}>
-                      No {noPriceCents}¢
+                      No {noPriceCents === null ? '--' : `${noPriceCents}¢`}
                     </div>
                   </button>
                 </div>
@@ -1520,7 +1597,7 @@ export default function HedgeModal({ event, choice, onClose, onHedgeComplete, pr
                         color: '#9ca3af',
                         marginTop: '0.5rem'
                       }}>
-                        Protection options are not available for this market at this time.
+                        {unavailableHint || 'Protection options are not available for this market at this time.'}
                       </div>
                     </div>
                   ) : null}

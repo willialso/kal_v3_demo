@@ -30,6 +30,18 @@ export default function EventsGrid({ activeTab = 'BTC', refreshKey = 0, onLoadin
         const data = await response.json()
         
         if (data.status === 'success') {
+          const parseProbability = (numericValue, percentText) => {
+            if (numericValue !== null && numericValue !== undefined) {
+              const num = Number(numericValue)
+              if (Number.isFinite(num) && num >= 0 && num <= 100) return num
+            }
+            if (typeof percentText === 'string') {
+              const parsed = Number(percentText.replace('%', '').trim())
+              if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 100) return parsed
+            }
+            return null
+          }
+
           // Handle empty events (cache not yet populated)
           if (!data.events || data.events.length === 0) {
             setEvents([])
@@ -42,15 +54,21 @@ export default function EventsGrid({ activeTab = 'BTC', refreshKey = 0, onLoadin
             return
           }
           
+          // Hide "when will hit" events from surfaced flow.
+          const filteredEvents = data.events.filter((e) => {
+            const title = String(e?.title || "").toLowerCase()
+            return !(e?.is_when_event || (title.includes("when will") && title.includes("hit")))
+          })
+
           // Transform API response to event format
-          const markets = data.events.map(e => ({
+          const markets = filteredEvents.map(e => ({
             id: e.market_id || e.event_ticker,
             event_ticker: e.event_ticker,
             market_id: e.market_id,
             title: e.title,
             icon: '₿',
-            yes_probability: e.yes_probability || parseFloat(e.yes_percentage?.replace('%', '') || '50'),
-            no_probability: e.no_probability || parseFloat(e.no_percentage?.replace('%', '') || '50'),
+            yes_probability: parseProbability(e.yes_probability, e.yes_percentage),
+            no_probability: parseProbability(e.no_probability, e.no_percentage),
             yes_percentage: e.yes_percentage,
             no_percentage: e.no_percentage,
             volume_24h_usd: e.volume_24h_usd,

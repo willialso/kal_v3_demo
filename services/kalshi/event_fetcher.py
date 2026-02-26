@@ -2,6 +2,7 @@
 Event Fetcher - Fetch top 4 BTC events by volume
 Simple, direct fetching focused on top volume events
 """
+import asyncio
 from decimal import Decimal
 from typing import List, Dict, Optional, Any
 from datetime import datetime
@@ -18,15 +19,13 @@ class EventFetcher:
     Fetch top 4 BTC events by volume:
     1. How high (KXBTCMAXY)
     2. How low (KXBTCMINY)
-    3. When will hit $150k (KXBTCMAX150)
-    4. Will BTC price above $100k (KXBTC2025100)
+    3. Will BTC price above $100k (KXBTC2025100)
     """
     
     # Target series tickers for top 4 events
     TARGET_SERIES = [
         'KXBTCMAXY',   # How high will Bitcoin get this year?
         'KXBTCMINY',   # How low will Bitcoin get this year?
-        'KXBTCMAX150', # When will Bitcoin hit $150k?
         'KXBTC2025100' # Will Bitcoin be above $100k by Dec 31, 2025?
     ]
     
@@ -61,33 +60,34 @@ class EventFetcher:
         
         all_events = []
         
-        # Fetch markets for each target series
-        import asyncio
-        for idx, series_ticker in enumerate(self.TARGET_SERIES):
-            # Add delay between requests to avoid rate limiting
-            if idx > 0:
-                await asyncio.sleep(0.5)  # 500ms delay
-            
+        # Fetch markets for each target series in parallel for lower latency
+        async def fetch_series_markets(series_ticker: str) -> List[Dict[str, Any]]:
             try:
-                # Fetch markets for this series
                 series_markets = await connector.fetch_markets(
                     category=None,
                     ticker_prefix=series_ticker,
                     max_pages=10  # Limit pages for performance
                 )
-                
+
                 if series_markets:
                     logger.info(
                         f"Fetched markets for {series_ticker}",
                         count=len(series_markets),
                         sample_titles=[m.get('title', 'N/A')[:50] for m in series_markets[:3]]
                     )
-                    all_events.extend(series_markets)
+                return series_markets or []
             except Exception as e:
                 logger.warning(
                     f"Error fetching markets for {series_ticker}",
                     error=str(e)
                 )
+                return []
+
+        series_results = await asyncio.gather(
+            *[fetch_series_markets(series_ticker) for series_ticker in self.TARGET_SERIES]
+        )
+        for series_markets in series_results:
+            all_events.extend(series_markets)
         
         # Extract YES/NO prices from market data or fetch ticker
         async def fetch_prices_for_event(event):
@@ -184,12 +184,20 @@ class EventFetcher:
                         error=str(e)
                     )
             
-            # Step 4: Final fallback - calculate from yes_price or default to 50/50
+            # Step 4: Fail closed if no real prices are available
+            if yes_price is None and no_price is None:
+                logger.warning(
+                    "Skipping event with missing yes/no pricing",
+                    market_id=event.get('market_id') or event.get('ticker') or event.get('event_ticker')
+                )
+                return None
+
+            # If one side is missing, infer from the other side only.
             if yes_price is None:
-                yes_price = 0.5
+                yes_price = 1.0 - float(no_price)
             if no_price is None:
-                no_price = 1.0 - yes_price if yes_price else 0.5
-            
+                no_price = 1.0 - float(yes_price)
+
             # Step 5: Normalize probabilities (ensure 0-1 range and sum to 1.0)
             yes_price = max(0.0, min(1.0, float(yes_price)))
             no_price = max(0.0, min(1.0, float(no_price)))
@@ -200,9 +208,11 @@ class EventFetcher:
                 yes_price = yes_price / total
                 no_price = no_price / total
             else:
-                # Fallback if both are 0
-                yes_price = 0.5
-                no_price = 0.5
+                logger.warning(
+                    "Skipping event with invalid zero probability totals",
+                    market_id=event.get('market_id') or event.get('ticker') or event.get('event_ticker')
+                )
+                return None
             
             event['yes_price'] = yes_price
             event['no_price'] = no_price
@@ -270,15 +280,6 @@ class EventFetcher:
                     f"Selected top {len(top_choices)} choices for {series}",
                     count=len(top_choices),
                     sample_tickers=[e.get('ticker', 'N/A')[:30] for e in top_choices[:2]]
-                )
-            elif series == 'KXBTCMAX150':
-                # For "when will" events, return top 2 date variants by volume
-                top_dates = series_events[:2]  # Top 2 date choices
-                result_events.extend(top_dates)
-                logger.info(
-                    f"Selected top {len(top_dates)} date choices for {series}",
-                    count=len(top_dates),
-                    sample_tickers=[e.get('ticker', 'N/A')[:30] for e in top_dates[:2]]
                 )
             else:
                 # For other events, return top event only

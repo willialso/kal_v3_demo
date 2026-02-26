@@ -331,13 +331,13 @@ class OptionChainService:
                 # Use semaphore to limit concurrent requests (respect rate limits)
                 # Deribit rate limit: ~20 req/s, but we're hitting limits
                 # Reduce to 5 concurrent requests and add delay between batches
-                semaphore = asyncio.Semaphore(10)  # Increased from 5 to 10 for faster parallel fetching
+                semaphore = asyncio.Semaphore(16)  # Increased from 5 to 10 for faster parallel fetching
                 
                 async def fetch_contract_data(data):
                     """Fetch ticker and orderbook for a single contract."""
                     async with semaphore:
                         # Rate limiting: Small delay per contract to avoid hitting Deribit limits
-                        await asyncio.sleep(0.05)  # 50ms delay per request
+                        await asyncio.sleep(0.01)  # 10ms delay per request
                         
                         symbol = data['symbol']
                         strike = data['strike']
@@ -451,7 +451,7 @@ class OptionChainService:
                         
                         # Add delay between batches to avoid rate limits
                         if i + batch_size < len(contract_data):
-                            await asyncio.sleep(0.2)  # 200ms delay between batches
+                            await asyncio.sleep(0.05)  # 50ms delay between batches
                     
                     # Filter out None results and exceptions
                     for result in contract_results:

@@ -8,20 +8,20 @@ export default function EventCard({ event, onProtect, isHedged = false, hedgeDat
   const [hedgeConfirmation, setHedgeConfirmation] = useState(null);
   const [showConfirmationModal, setShowConfirmationModal] = useState(false);
   // Check if this is a multi-choice event ("how" or "when will") with choices
-  const isMultiChoiceEvent = event.is_how_event || event.is_when_event || (event.choices && event.choices.length > 0);
+  const isMultiChoiceEvent = event.is_how_event || (event.choices && event.choices.length > 0);
   const choices = event.choices || [];
   
   // Get YES/NO percentages for regular events
-  const yesPercent = event.yes_percentage || event.yes_probability || '50%';
-  const noPercent = event.no_percentage || event.no_probability || '50%';
+  const yesPercent = event.yes_percentage || event.yes_probability || '--';
+  const noPercent = event.no_percentage || event.no_probability || '--';
   
   // Parse percentages to numbers for calculations
-  const yesPercentNum = parseFloat(yesPercent.toString().replace('%', '')) || 50;
-  const noPercentNum = parseFloat(noPercent.toString().replace('%', '')) || 50;
+  const yesPercentNum = parseFloat(yesPercent.toString().replace('%', ''));
+  const noPercentNum = parseFloat(noPercent.toString().replace('%', ''));
   
   // Calculate payout amounts (like Kalshi shows: $100 → $X)
-  const yesPayout = yesPercentNum > 0 ? Math.round(100 / (yesPercentNum / 100)) : 0;
-  const noPayout = noPercentNum > 0 ? Math.round(100 / (noPercentNum / 100)) : 0;
+  const yesPayout = Number.isFinite(yesPercentNum) && yesPercentNum > 0 ? Math.round(100 / (yesPercentNum / 100)) : null;
+  const noPayout = Number.isFinite(noPercentNum) && noPercentNum > 0 ? Math.round(100 / (noPercentNum / 100)) : null;
 
   const formatVolume = (volume) => {
     if (!volume) return '';
@@ -375,7 +375,7 @@ export default function EventCard({ event, onProtect, isHedged = false, hedgeDat
                 color: '#6b7280',
                 marginTop: '0.125rem'
               }}>
-                $100 → <span style={{ color: '#059669', fontWeight: 600 }}>${yesPayout.toLocaleString()}</span>
+                $100 → <span style={{ color: '#059669', fontWeight: 600 }}>{yesPayout === null ? '--' : `$${yesPayout.toLocaleString()}`}</span>
               </span>
             </button>
 
@@ -425,7 +425,7 @@ export default function EventCard({ event, onProtect, isHedged = false, hedgeDat
                 color: '#6b7280',
                 marginTop: '0.125rem'
               }}>
-                $100 → <span style={{ color: '#059669', fontWeight: 600 }}>${noPayout.toLocaleString()}</span>
+                $100 → <span style={{ color: '#059669', fontWeight: 600 }}>{noPayout === null ? '--' : `$${noPayout.toLocaleString()}`}</span>
               </span>
             </button>
           </div>

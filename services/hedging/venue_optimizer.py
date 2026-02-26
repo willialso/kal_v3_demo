@@ -19,7 +19,7 @@ class VenueOptimizer:
     """
     
     MIN_CHARGED_PREMIUM_USD = Decimal('5')  # Minimum charge to user (after markup)
-    MIN_VALUE_RATIO = Decimal('1.1')  # Max payout must be at least 10% more than charged premium
+    MIN_VALUE_RATIO = Decimal('1.10')  # Max payout must be at least 10% more than charged premium
     
     def optimize(
         self,

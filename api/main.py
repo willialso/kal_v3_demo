@@ -82,6 +82,7 @@ app = FastAPI(
 
 # Initialize state for caching BTC events
 app.state.btc_events = []
+app.state.btc_top_volume_cache = {"timestamp": 0.0, "events": []}
 
 # CORS middleware
 app.add_middleware(
@@ -139,6 +140,11 @@ async def api_root():
     return {"message": "Kalshi Demo V2 API", "version": "2.0.0"}
 
 
+@app.get("/health")
+async def health():
+    """Simple health endpoint."""
+    return {"status": "ok", "service": "kalshi-demo-v2-api"}
+
 @app.post("/cache/clear")
 async def clear_cache():
     """Clear option chain cache (for debugging/rate limit recovery)."""
@@ -159,6 +165,20 @@ async def get_events():
     4. Will BTC price above $100k (KXBTC2025100)
     """
     try:
+        safe_limit = max(1, int(limit))
+
+        cache_entry = getattr(app.state, "btc_top_volume_cache", None) or {}
+        cached_events = cache_entry.get("events", [])
+        cache_ts = float(cache_entry.get("timestamp", 0.0) or 0.0)
+        if cached_events and (time.time() - cache_ts) < 20:
+            limited_cached_events = cached_events[:safe_limit]
+            app.state.btc_events = cached_events
+            return {
+                "status": "success",
+                "count": len(limited_cached_events),
+                "events": limited_cached_events
+            }
+
         events = await event_fetcher.get_top_4_btc_events()
         
         # Format events for response
@@ -191,6 +211,8 @@ async def get_btc_top_volume_events(limit: int = 10):
         Response matching frontend expected format
     """
     try:
+        safe_limit = max(1, int(limit))
+
         events = await event_fetcher.get_top_4_btc_events()
         
         # Group events by series - show one event per series with choices
@@ -198,8 +220,12 @@ async def get_btc_top_volume_events(limit: int = 10):
         for event in events:
             ticker = event.get('ticker', '') or event.get('event_ticker', '')
             series_ticker = ticker.split('-')[0] if '-' in ticker else ''
+            title_lower = str(event.get('title', '')).lower()
+            # Do not surface \"when will hit\" events in this demo path.
+            if series_ticker == 'KXBTCMAX150' or ('when will' in title_lower and 'hit' in title_lower):
+                continue
             
-            if series_ticker in ['KXBTCMAXY', 'KXBTCMINY', 'KXBTCMAX150']:
+            if series_ticker in ['KXBTCMAXY', 'KXBTCMINY']:
                 # Group "how" and "when will" events by series
                 if series_ticker not in events_by_series:
                     events_by_series[series_ticker] = []
@@ -213,7 +239,7 @@ async def get_btc_top_volume_events(limit: int = 10):
         series_count = 0
         
         for series_key, series_events in events_by_series.items():
-            if series_count >= limit:
+            if series_count >= safe_limit:
                 break
             
             # Use first event as base, collect all as choices for "how" events
@@ -347,10 +373,10 @@ async def get_btc_top_volume_events(limit: int = 10):
                 "title": base_event.get('title', ''),
                 "series_ticker": series_ticker,
                 "category": "Crypto",
-                "yes_probability": round(yes_price * 100, 1) if yes_price else None,
-                "no_probability": round(no_price * 100, 1) if no_price else None,
-                "yes_percentage": f"{round(yes_price * 100, 1)}%" if yes_price else None,
-                "no_percentage": f"{round(no_price * 100, 1)}%" if no_price else None,
+                "yes_probability": round(yes_price * 100, 1) if yes_price is not None else None,
+                "no_probability": round(no_price * 100, 1) if no_price is not None else None,
+                "yes_percentage": f"{round(yes_price * 100, 1)}%" if yes_price is not None else None,
+                "no_percentage": f"{round(no_price * 100, 1)}%" if no_price is not None else None,
                 "volume_24h_usd": f"${total_volume:,.0f}",
                 "volume_millions": f"${total_volume / 1_000_000:.1f}M" if total_volume >= 1_000_000 else f"${total_volume / 1_000:.1f}K",
                 "settlement_date": base_event.get('expected_expiration_time', '') or base_event.get('settlement_date', ''),
@@ -358,20 +384,106 @@ async def get_btc_top_volume_events(limit: int = 10):
                 "threshold_price": threshold_price,
                 "choices": choices,
                 "is_how_event": series_ticker in ['KXBTCMAXY', 'KXBTCMINY'],
-                "is_when_event": series_ticker == 'KXBTCMAX150'
+                "is_when_event": False
             })
             
             series_count += 1
         
+
+        # Keep only events that are hedgeable right now (best UX).
+        hedgeable_by_expiry = {}
+
+        async def _is_event_hedgeable_now(event_payload):
+            settlement_raw = event_payload.get("settlement_date")
+            if not settlement_raw:
+                return False
+
+            settlement_str = str(settlement_raw)
+            expiry_token = settlement_str.split("T")[0].split(" ")[0]
+            try:
+                expiry_date_obj = date.fromisoformat(expiry_token)
+            except ValueError:
+                return False
+
+            expiry_key = expiry_date_obj.isoformat()
+            if expiry_key in hedgeable_by_expiry:
+                return hedgeable_by_expiry[expiry_key]
+
+            days_to_expiry = (expiry_date_obj - date.today()).days
+            if days_to_expiry < 1:
+                hedgeable_by_expiry[expiry_key] = False
+                return False
+
+            if days_to_expiry <= 30:
+                min_days = max(1, days_to_expiry - 30)
+                max_days = days_to_expiry + 30
+            else:
+                min_days = max(1, days_to_expiry - 14)
+                max_days = days_to_expiry + 14
+
+            availability_cache_key = f"surface-hedgeable-{expiry_key}-{min_days}-{max_days}"
+
+            async def _fetch_available_chains():
+                return await option_chain_service.get_option_chains(
+                    underlying='BTC',
+                    expiry_date=expiry_date_obj,
+                    min_days_to_expiry=min_days,
+                    max_days_to_expiry=max_days
+                )
+
+            try:
+                chains = await chain_cache.get(availability_cache_key, _fetch_available_chains, ttl_seconds=180)
+                hedgeable = bool(chains)
+            except Exception as availability_error:
+                logger.warning(
+                    "Failed hedgeability check for surfaced event",
+                    event_ticker=event_payload.get("event_ticker"),
+                    settlement_date=settlement_str,
+                    error=str(availability_error)
+                )
+                hedgeable = False
+
+            hedgeable_by_expiry[expiry_key] = hedgeable
+            return hedgeable
+
+        if formatted_events:
+            import asyncio
+            checks = await asyncio.gather(*[_is_event_hedgeable_now(evt) for evt in formatted_events], return_exceptions=True)
+
+            hedgeable_events = []
+            for evt, ok in zip(formatted_events, checks):
+                if isinstance(ok, Exception):
+                    logger.warning(
+                        "Unexpected hedgeability check exception",
+                        event_ticker=evt.get("event_ticker"),
+                        error=str(ok)
+                    )
+                    continue
+                if ok:
+                    hedgeable_events.append(evt)
+
+            formatted_events = hedgeable_events
+
+        if not formatted_events:
+            app.state.btc_events = []
+            app.state.btc_top_volume_cache = {
+                "timestamp": time.time(),
+                "events": []
+            }
+            return {
+                "status": "success",
+                "count": 0,
+                "events": [],
+                "message": "No currently hedgeable BTC events available"
+            }
+
         # Cache formatted events (with choices) for hedge quote matching
         app.state.btc_events = formatted_events
+        app.state.btc_top_volume_cache = {"timestamp": time.time(), "events": formatted_events}
         logger.info("Cached formatted BTC events for hedge matching", count=len(formatted_events))
-        
-        return {
-            "status": "success",
-            "count": len(formatted_events),
-            "events": formatted_events
-        }
+
+        limited_events = formatted_events[:safe_limit]
+        return {"status": "success", "count": len(limited_events), "events": limited_events}
     except Exception as e:
         logger.error("Failed to fetch BTC top volume events", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to fetch events: {str(e)}")
@@ -426,6 +538,28 @@ async def get_hedge_quote(request: HedgeQuoteRequest):
         # Override threshold if choice_threshold provided
         if request.choice_threshold:
             canonical_event.threshold_price = request.choice_threshold
+
+        # For "when will" selections, derive expiry from choice ticker token (YYMMMDD).
+        if request.choice_ticker:
+            try:
+                import re
+                parts = request.choice_ticker.split('-')
+                if len(parts) >= 3:
+                    token = parts[2].upper()  # e.g. 26MAY31
+                    m = re.match(r'(\d{2})([A-Z]{3})(\d{2})', token)
+                    if m:
+                        year = 2000 + int(m.group(1))
+                        mon = m.group(2)
+                        day = int(m.group(3))
+                        mon_map = {
+                            'JAN': 1, 'FEB': 2, 'MAR': 3, 'APR': 4, 'MAY': 5, 'JUN': 6,
+                            'JUL': 7, 'AUG': 8, 'SEP': 9, 'OCT': 10, 'NOV': 11, 'DEC': 12
+                        }
+                        month = mon_map.get(mon)
+                        if month:
+                            canonical_event.expiry_date = date(year, month, day)
+            except Exception:
+                pass
         
         # 3. Create hedge request
         hedge_request = kalshi_adapter.create_hedge_request(
@@ -441,15 +575,22 @@ async def get_hedge_quote(request: HedgeQuoteRequest):
         # Fetch chains with caching
         # For "when will" events or very short-term events, use more flexible expiry matching
         days_to_expiry = (canonical_event.expiry_date - date.today()).days
+
+        if days_to_expiry < 1:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Selected event expiry {canonical_event.expiry_date} is in the past"
+            )
+
         if days_to_expiry <= 30:
             # Very short-term: allow up to 30 days flexibility
             min_days = max(1, days_to_expiry - 30)
-            max_days = days_to_expiry + 30
+            max_days = max(min_days, days_to_expiry + 30)
         else:
             # Standard: ±14 days flexibility
             min_days = max(1, days_to_expiry - 14)
-            max_days = days_to_expiry + 14
-        
+            max_days = max(min_days, days_to_expiry + 14)
+
         cache_key = f"expiry-{canonical_event.expiry_date.isoformat()}-flex{min_days}-{max_days}"
         
         async def fetch_chains():
@@ -609,12 +750,129 @@ async def get_hedge_quote(request: HedgeQuoteRequest):
         
         return HedgeQuoteResponse(hedges=hedges)
     
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        fallback_stake = float(displayed_stake) if 'displayed_stake' in locals() else 0.0
+        return {
+            "status": "unavailable",
+            "tiers": [],
+            "actual_stake_usd": fallback_stake,
+            "displayed_stake_usd": fallback_stake,
+            "stake_multiplier": 1.0,
+            "rejection_reasons": {"availability": [str(e.detail)]}
+        }
     except Exception as e:
         logger.error("Failed to get hedge quote", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to get hedge quote: {str(e)}")
 
+
+@app.get("/kalshi/protection-tiers")
+async def get_protection_tiers(
+    market_id: Optional[str] = None,
+    event_ticker: Optional[str] = None,
+    choice_ticker: Optional[str] = None,
+    threshold_price: Optional[Decimal] = None,
+    expiry_date: Optional[str] = None,
+    yes_stake_usd: Decimal = Decimal('0'),
+    no_stake_usd: Decimal = Decimal('0')
+):
+    """Frontend-compatible tiers endpoint using /kalshi/hedge-quote output."""
+    try:
+        if yes_stake_usd < 0 or no_stake_usd < 0:
+            return {
+                "status": "unavailable",
+                "tiers": [],
+                "actual_stake_usd": 0.0,
+                "displayed_stake_usd": 0.0,
+                "stake_multiplier": 1.0,
+                "rejection_reasons": {"validation": ["Stake values must be non-negative"]}
+            }
+
+        active_count = int(yes_stake_usd > 0) + int(no_stake_usd > 0)
+        if active_count != 1:
+            return {
+                "status": "unavailable",
+                "tiers": [],
+                "actual_stake_usd": 0.0,
+                "displayed_stake_usd": 0.0,
+                "stake_multiplier": 1.0,
+                "rejection_reasons": {"validation": ["Provide exactly one active side stake"]}
+            }
+
+        event_id = (choice_ticker or event_ticker or market_id or "").strip()
+        if not event_id:
+            return {
+                "status": "unavailable",
+                "tiers": [],
+                "actual_stake_usd": 0.0,
+                "displayed_stake_usd": 0.0,
+                "stake_multiplier": 1.0,
+                "rejection_reasons": {"validation": ["event_ticker, market_id, or choice_ticker is required"]}
+            }
+
+        direction = "yes" if yes_stake_usd > 0 else "no"
+        stake = yes_stake_usd if direction == "yes" else no_stake_usd
+
+        hedge_resp = await get_kalshi_hedge_quote(
+            event_id=event_id,
+            direction=direction,
+            stake=float(stake)
+        )
+
+        if hedge_resp.get("status") != "available" or not hedge_resp.get("candidates"):
+            return {
+                "status": "unavailable",
+                "tiers": [],
+                "actual_stake_usd": float(stake),
+                "displayed_stake_usd": float(stake),
+                "stake_multiplier": 1.0,
+                "rejection_reasons": hedge_resp.get("rejection_reasons", {"no_options": ["No suitable hedge options found"]})
+            }
+
+        tiers = []
+        for c in hedge_resp.get("candidates", []):
+            raw_strikes = c.get("strikes") or []
+            try:
+                strikes = sorted(float(x) for x in raw_strikes)
+            except Exception:
+                strikes = []
+
+            strike_range = None
+            if len(strikes) >= 2:
+                strike_range = f"BTC ${strikes[0]:,.0f} - ${strikes[-1]:,.0f}"
+            elif len(strikes) == 1:
+                strike_range = f"BTC ${strikes[0]:,.0f}"
+
+            label = c.get("tier", "standard")
+            tier_name = (label.split()[0] if label else "standard").lower()
+
+            tiers.append({
+                "tier_name": tier_name,
+                "tier": label,
+                "premium_usd": c.get("premium_usd", 0),
+                "max_payout_usd": c.get("max_payout_usd", 0),
+                "description": c.get("description", ""),
+                "strikes": strikes,
+                "strike_range": strike_range
+            })
+
+        return {
+            "status": "available",
+            "tiers": tiers,
+            "actual_stake_usd": float(stake),
+            "displayed_stake_usd": float(stake),
+            "stake_multiplier": 1.0
+        }
+
+    except Exception as e:
+        logger.error("Failed to get protection tiers", error=str(e), exc_info=True)
+        return {
+            "status": "unavailable",
+            "tiers": [],
+            "actual_stake_usd": 0.0,
+            "displayed_stake_usd": 0.0,
+            "stake_multiplier": 1.0,
+            "rejection_reasons": {"error": [str(e)]}
+        }
 
 @app.get("/kalshi/hedge-quote")
 async def get_kalshi_hedge_quote(
@@ -878,7 +1136,56 @@ async def get_kalshi_hedge_quote(
         
         # Call the main hedge quote endpoint logic
         hedge_response = await get_hedge_quote(hedge_request)
-        
+
+        # Compatibility: some builds return dict payload instead of HedgeQuoteResponse model
+        if isinstance(hedge_response, dict):
+            hedges_data = hedge_response.get("hedges", [])
+            logger.info("Hedge quote response",
+                       hedge_count=len(hedges_data),
+                       status="available" if hedges_data else "unavailable")
+
+            if not hedges_data:
+                return {
+                    "status": "hedge_unavailable",
+                    "candidates": [],
+                    "rejection_reasons": hedge_response.get("rejection_reasons", {"no_options": ["No suitable hedge options found"]})
+                }
+
+            candidates = []
+            tier_names = ["Light protection", "Standard protection", "Max protection"]
+
+            for idx, hedge in enumerate(hedges_data):
+                legs = hedge.get("legs", []) if isinstance(hedge, dict) else []
+                strikes = []
+                for leg in legs:
+                    try:
+                        strikes.append(float(leg.get("strike")))
+                    except Exception:
+                        pass
+
+                premium = hedge.get("charged_premium_usd", hedge.get("premium_usd", 0.0))
+                raw_premium = hedge.get("raw_premium_usd", hedge.get("premium_usd", premium))
+                markup = hedge.get("markup_usd", 0.0)
+
+                candidates.append({
+                    "tier": tier_names[idx] if idx < len(tier_names) else hedge.get("label", "standard"),
+                    "premium_usd": float(premium),
+                    "raw_premium_usd": float(raw_premium),
+                    "charged_premium_usd": float(premium),
+                    "markup_usd": float(markup),
+                    "max_payout_usd": float(hedge.get("max_payout_usd", 0.0)),
+                    "description": hedge.get("description", ""),
+                    "notional": 0.0,
+                    "strikes": strikes,
+                    "venue": hedge.get("venue", "Unknown")
+                })
+
+            return {
+                "status": "available",
+                "candidates": candidates,
+                "rejection_reasons": {}
+            }
+
         logger.info("Hedge quote response", 
                    hedge_count=len(hedge_response.hedges),
                    status="available" if hedge_response.hedges else "unavailable")
@@ -937,8 +1244,16 @@ async def get_kalshi_hedge_quote(
             "rejection_reasons": {}
         }
     
-    except HTTPException:
-        raise
+    except HTTPException as e:
+        fallback_stake = float(displayed_stake) if 'displayed_stake' in locals() else 0.0
+        return {
+            "status": "unavailable",
+            "tiers": [],
+            "actual_stake_usd": fallback_stake,
+            "displayed_stake_usd": fallback_stake,
+            "stake_multiplier": 1.0,
+            "rejection_reasons": {"availability": [str(e.detail)]}
+        }
     except Exception as e:
         logger.error("Failed to get Kalshi hedge quote", error=str(e), exc_info=True)
         return {
@@ -953,6 +1268,7 @@ async def get_kalshi_hedge_quote(
 # Serve static frontend files AFTER all API routes are registered
 # This allows the frontend to be served from the same domain as the API
 import os
+import time
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
