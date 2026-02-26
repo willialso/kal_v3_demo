@@ -2,6 +2,9 @@ import './App.css'
 import { useState, useEffect } from 'react'
 import Header from './components/Header'
 import EventsGrid from './components/EventsGrid'
+import PresentationGate from './components/PresentationGate'
+
+const GATE_STORAGE_KEY = 'tvp_presentation_gate_ack_v1'
 
 function App() {
   const [activeTab, setActiveTab] = useState('BTC')
@@ -9,9 +12,19 @@ function App() {
   const [showHedgeDetailsModal, setShowHedgeDetailsModal] = useState(false)
   const [refreshKey, setRefreshKey] = useState(0)
   const [isEventsLoading, setIsEventsLoading] = useState(true)
+  const [gateAccepted, setGateAccepted] = useState(() => {
+    if (typeof window === 'undefined') return false
+    try {
+      return window.localStorage.getItem(GATE_STORAGE_KEY) === 'accepted'
+    } catch {
+      return false
+    }
+  })
 
   // Listen for hedge details from EventCard
   useEffect(() => {
+    if (!gateAccepted) return undefined
+
     const checkHedgeDetails = () => {
       if (window.hedgeDetailsStrategy) {
         setHedgeDetails(window.hedgeDetailsStrategy)
@@ -20,7 +33,16 @@ function App() {
     }
     const interval = setInterval(checkHedgeDetails, 100)
     return () => clearInterval(interval)
-  }, [])
+  }, [gateAccepted])
+
+  const handleGateAgree = () => {
+    try {
+      window.localStorage.setItem(GATE_STORAGE_KEY, 'accepted')
+    } catch {
+      // Ignore storage failures and proceed for this session.
+    }
+    setGateAccepted(true)
+  }
 
   const handleShowHedgeDetails = () => {
     if (hedgeDetails || window.hedgeDetailsStrategy) {
@@ -38,6 +60,10 @@ function App() {
 
   const handleRefresh = () => {
     setRefreshKey(prev => prev + 1)
+  }
+
+  if (!gateAccepted) {
+    return <PresentationGate onAgree={handleGateAgree} />
   }
 
   return (
